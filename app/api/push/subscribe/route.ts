@@ -1,7 +1,5 @@
-﻿
-import { NextResponse } from "next/server";
+﻿import { NextResponse } from "next/server";
 import { createHash } from "node:crypto";
-
 import { adminDb } from "@/lib/firebase-admin";
 
 type PushSubscriptionPayload = {
@@ -25,7 +23,6 @@ type VoucherData = {
 
 function isVoucherExpired(expiryDate: string): boolean {
   if (!expiryDate) return false;
-
   const today = new Date().toISOString().slice(0, 10);
   return expiryDate < today;
 }
@@ -33,14 +30,9 @@ function isVoucherExpired(expiryDate: string): boolean {
 export async function POST(request: Request) {
   try {
     const body = await request.json();
+    const cafeId = typeof body.cafeId === "string" ? body.cafeId.trim() : "";
+    const subscription = body.subscription as PushSubscriptionPayload | undefined;
 
-    const cafeId =
-      typeof body.cafeId === "string" ? body.cafeId.trim() : "";
-
-    const subscription =
-      body.subscription as PushSubscriptionPayload | undefined;
-
-    // Validate required fields.
     if (!cafeId || !subscription) {
       return NextResponse.json(
         { error: "Cafe ID and subscription are required." },
@@ -48,7 +40,6 @@ export async function POST(request: Request) {
       );
     }
 
-    // Validate the browser push subscription.
     if (
       typeof subscription.endpoint !== "string" ||
       !subscription.endpoint.startsWith("https://") ||
@@ -61,7 +52,6 @@ export async function POST(request: Request) {
       );
     }
 
-    // Confirm that the cafe exists.
     const cafeSnapshot = await adminDb
       .collection("public_cafes")
       .doc(cafeId)
@@ -74,16 +64,17 @@ export async function POST(request: Request) {
       );
     }
 
-    // Stable ID for this cafe + browser endpoint.
     const subscriptionId = createHash("sha256")
       .update(`${cafeId}:${subscription.endpoint}`)
       .digest("hex");
 
+    // FIX: Save under the subcollection paths targeted by the delivery / cron engine
     const subscriptionRef = adminDb
-      .collection("push_subscriptions")
+      .collection("cafes")
+      .doc(cafeId)
+      .collection("subscriptions")
       .doc(subscriptionId);
 
-    // Save the browser subscription.
     await subscriptionRef.set(
       {
         cafeId,
@@ -94,7 +85,6 @@ export async function POST(request: Request) {
       { merge: true }
     );
 
-    // One welcome reward per cafe + browser subscription.
     const welcomeClaimRef = adminDb
       .collection("push_welcome_claims")
       .doc(subscriptionId);
@@ -106,29 +96,20 @@ export async function POST(request: Request) {
 
     const welcomeVoucher = await adminDb.runTransaction(
       async (transaction) => {
-        // Check whether this subscription already received a reward.
         const existingClaim = await transaction.get(welcomeClaimRef);
 
         if (existingClaim.exists) {
           const saved = existingClaim.data();
-
-          return saved?.voucher
-            ? saved.voucher
-            : null;
+          return saved?.voucher ? saved.voucher : null;
         }
 
-        // Find active vouchers for this cafe.
         const voucherResults = await transaction.get(vouchersQuery);
-
         const availableVoucher = voucherResults.docs.find((voucherDoc) => {
           const voucher = voucherDoc.data() as VoucherData;
-
           const usageCount = Number(voucher.usageCount ?? 0);
           const usageLimit = Number(voucher.usageLimit ?? 0);
           const expiryDate = String(voucher.expiryDate ?? "");
-
-          const withinUsageLimit =
-            usageLimit <= 0 || usageCount < usageLimit;
+          const withinUsageLimit = usageLimit <= 0 || usageCount < usageLimit;
 
           return (
             voucher.active === true &&
@@ -138,28 +119,21 @@ export async function POST(request: Request) {
           );
         });
 
-        // No eligible voucher: subscription remains enabled,
-        // but no welcome coupon is issued.
         if (!availableVoucher) {
           return null;
         }
 
         const voucherRef = availableVoucher.ref;
         const voucher = availableVoucher.data() as VoucherData;
-
         const usageCount = Number(voucher.usageCount ?? 0);
         const usageLimit = Number(voucher.usageLimit ?? 0);
         const expiryDate = String(voucher.expiryDate ?? "");
 
-        // Prepare the reward details.
         const reward = {
           id: availableVoucher.id,
           cafeId,
           code: String(voucher.code ?? ""),
-          discountType:
-            voucher.discountType === "fixed"
-              ? "fixed"
-              : "percentage",
+          discountType: voucher.discountType === "fixed" ? "fixed" : "percentage",
           discountValue: Number(voucher.discountValue ?? 0),
           expiryDate,
           usageLimit,
@@ -167,12 +141,10 @@ export async function POST(request: Request) {
           active: true,
         };
 
-        // Reserve one use of this voucher.
         transaction.update(voucherRef, {
           usageCount: usageCount + 1,
         });
 
-        // Save the one-time welcome claim.
         transaction.set(welcomeClaimRef, {
           cafeId,
           subscriptionId,
@@ -181,11 +153,7 @@ export async function POST(request: Request) {
           createdAt: new Date(),
         });
 
-        // Track the reward in existing engagement logs.
-        const engagementRef = adminDb
-          .collection("engagement_logs")
-          .doc();
-
+        const engagementRef = adminDb.collection("engagement_logs").doc();
         transaction.set(engagementRef, {
           cafeId,
           action: "push_welcome_coupon_claimed",
@@ -207,7 +175,6 @@ export async function POST(request: Request) {
     });
   } catch (error) {
     console.error("Push subscription API error:", error);
-
     return NextResponse.json(
       { error: "Unable to save the push subscription." },
       { status: 500 }
