@@ -1,3 +1,4 @@
+
 "use client";
 
 import {
@@ -27,6 +28,7 @@ import {
 } from "firebase/firestore";
 
 import { db } from "../../../lib/firebase";
+import { subscribeToPush } from "../../../lib/push";
 
 const feedbackCategories = [
   "Food Quality",
@@ -115,11 +117,20 @@ function CustomerFeedbackPageContent() {
   const [submitting, setSubmitting] = useState(false);
   const [isSubmitted, setIsSubmitted] = useState(false);
 
+  // Existing loyalty voucher states.
   const [couponClaimed, setCouponClaimed] = useState(false);
   const [claimedVoucher, setClaimedVoucher] = useState<Voucher | null>(
     null
   );
   const [claimingCoupon, setClaimingCoupon] = useState(false);
+
+  // Browser push notification states.
+  const [pushMessage, setPushMessage] = useState("");
+  const [pushLoading, setPushLoading] = useState(false);
+
+  // Separate voucher for the notification welcome reward.
+  const [welcomeVoucher, setWelcomeVoucher] =
+    useState<Voucher | null>(null);
 
   const pageViewTracked = useRef(false);
 
@@ -281,6 +292,8 @@ function CustomerFeedbackPageContent() {
     });
   }
 
+  // Existing loyalty voucher claim.
+  // This feature remains separate from the notification welcome coupon.
   async function handleClaimCoupon() {
     if (couponClaimed || claimingCoupon) {
       return;
@@ -417,6 +430,71 @@ function CustomerFeedbackPageContent() {
       }
     } finally {
       setClaimingCoupon(false);
+    }
+  }
+
+  // Enable browser push notifications and issue the welcome coupon.
+  async function handleEnableNotifications() {
+    setPushLoading(true);
+    setPushMessage("");
+    setWelcomeVoucher(null);
+
+    try {
+      // subscribeToPush() requests permission and throws unless
+      // the browser permission is actually granted.
+      const subscription = await subscribeToPush();
+
+      // Explicitly verify browser permission.
+      if (
+        typeof Notification === "undefined" ||
+        Notification.permission !== "granted"
+      ) {
+        throw new Error(
+          "Please allow browser notifications to receive the welcome coupon."
+        );
+      }
+
+      // Save the subscription.
+      // The API handles the one-time welcome voucher assignment.
+      const response = await fetch("/api/push/subscribe", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          cafeId,
+          subscription: subscription.toJSON(),
+        }),
+      });
+
+      const result = await response.json();
+
+      if (!response.ok || result.success !== true) {
+        throw new Error(
+          result.error ||
+            "Unable to save the notification subscription."
+        );
+      }
+
+      // Display the welcome voucher returned by the API.
+      if (result.welcomeVoucher) {
+        setWelcomeVoucher(result.welcomeVoucher as Voucher);
+      }
+
+      setPushMessage(
+        result.welcomeMessage ||
+          "Notifications enabled successfully!"
+      );
+    } catch (err) {
+      console.error("Failed to enable notifications:", err);
+
+      setPushMessage(
+        err instanceof Error
+          ? err.message
+          : "Unable to enable notifications. Please try again."
+      );
+    } finally {
+      setPushLoading(false);
     }
   }
 
@@ -564,6 +642,7 @@ Sent from CafeFlow Feedback System.
             </div>
           )}
 
+          {/* Google Review, browser notifications, and loyalty voucher */}
           <div className="mt-8 rounded-2xl border border-orange-100 bg-orange-50/50 p-5">
             <h2 className="text-lg font-extrabold text-slate-900">
               Stay connected with us
@@ -574,6 +653,69 @@ Sent from CafeFlow Feedback System.
               claim a loyalty voucher for your next visit.
             </p>
 
+            {/* Browser notification opt-in */}
+            <div className="mt-5 rounded-xl border border-orange-200 bg-white p-4 text-left">
+              <h3 className="font-bold text-slate-900">
+                Get cafe updates
+              </h3>
+
+              <p className="mt-2 text-sm leading-6 text-slate-600">
+                Enable browser notifications to receive special offers
+                and updates from this cafe.
+              </p>
+
+              <button
+                type="button"
+                onClick={handleEnableNotifications}
+                disabled={pushLoading}
+                className="mt-4 w-full rounded-xl px-4 py-3 font-bold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                style={{ backgroundColor: cafe.primaryColor }}
+              >
+                {pushLoading
+                  ? "Enabling Notifications..."
+                  : "Enable Notifications"}
+              </button>
+
+              {pushMessage && (
+                <p
+                  role="status"
+                  className="mt-3 text-sm text-slate-600"
+                >
+                  {pushMessage}
+                </p>
+              )}
+
+              {/* Notification welcome coupon */}
+              {welcomeVoucher && (
+                <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+                  <p className="text-sm font-bold text-emerald-800">
+                    Your notification welcome coupon
+                  </p>
+
+                  <p className="mt-2 text-2xl font-extrabold tracking-wider text-emerald-700">
+                    {welcomeVoucher.code}
+                  </p>
+
+                  <p className="mt-2 text-sm font-semibold text-emerald-800">
+                    {welcomeVoucher.discountType === "percentage"
+                      ? `${welcomeVoucher.discountValue}% off`
+                      : `₹${welcomeVoucher.discountValue} off`}
+                  </p>
+
+                  {welcomeVoucher.expiryDate && (
+                    <p className="mt-2 text-xs text-emerald-700">
+                      Valid until: {welcomeVoucher.expiryDate}
+                    </p>
+                  )}
+
+                  <p className="mt-2 text-xs text-emerald-700">
+                    Show this coupon to the cafe staff on your next visit.
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {/* Google Review */}
             <button
               type="button"
               onClick={handleGoogleReview}
@@ -583,6 +725,7 @@ Sent from CafeFlow Feedback System.
               Write a Google Review
             </button>
 
+            {/* Existing loyalty voucher */}
             <button
               type="button"
               onClick={handleClaimCoupon}

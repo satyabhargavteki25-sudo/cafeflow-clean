@@ -1,3 +1,4 @@
+
 "use client";
 
 import Image from "next/image";
@@ -51,6 +52,20 @@ type Voucher = {
   active?: boolean;
   usageCount?: number;
   usageLimit?: number;
+};
+
+type PushSubscriptionRecord = {
+  id: string;
+  cafeId: string;
+  active?: boolean;
+  subscription?: {
+    endpoint?: string;
+    keys?: {
+      p256dh?: string;
+      auth?: string;
+    };
+  };
+  updatedAt?: Timestamp;
 };
 
 type DateFilter = "today" | "7days" | "30days" | "all";
@@ -301,16 +316,22 @@ export default function Dashboard() {
   const [feedbackLoading, setFeedbackLoading] = useState(true);
   const [engagementLoading, setEngagementLoading] = useState(true);
   const [voucherLoading, setVoucherLoading] = useState(true);
+  const [pushSubscriptionLoading, setPushSubscriptionLoading] =
+    useState(true);
 
   const [logoutLoading, setLogoutLoading] = useState(false);
 
   const [feedback, setFeedback] = useState<Feedback[]>([]);
   const [engagementLogs, setEngagementLogs] = useState<EngagementLog[]>([]);
   const [vouchers, setVouchers] = useState<Voucher[]>([]);
+  const [pushSubscriptions, setPushSubscriptions] =
+    useState<PushSubscriptionRecord[]>([]);
 
   const [feedbackError, setFeedbackError] = useState("");
   const [engagementError, setEngagementError] = useState("");
   const [voucherError, setVoucherError] = useState("");
+  const [pushSubscriptionError, setPushSubscriptionError] =
+    useState("");
 
   const [updatingFeedbackId, setUpdatingFeedbackId] = useState<
     string | null
@@ -464,6 +485,55 @@ export default function Dashboard() {
         );
 
         setVoucherLoading(false);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [user]);
+
+  // Listen to push notification subscriptions.
+  useEffect(() => {
+    if (!user) {
+      setPushSubscriptions([]);
+      setPushSubscriptionLoading(false);
+      return;
+    }
+
+    setPushSubscriptionLoading(true);
+    setPushSubscriptionError("");
+
+    const subscriptionsQuery = query(
+      collection(db, "push_subscriptions"),
+      where("cafeId", "==", user.uid)
+    );
+
+    const unsubscribe = onSnapshot(
+      subscriptionsQuery,
+      (snapshot) => {
+        const items: PushSubscriptionRecord[] =
+          snapshot.docs.map((document) => ({
+            id: document.id,
+            ...(document.data() as Omit<
+              PushSubscriptionRecord,
+              "id"
+            >),
+          }));
+
+        setPushSubscriptions(items);
+        setPushSubscriptionLoading(false);
+        setPushSubscriptionError("");
+      },
+      (error) => {
+        console.error(
+          "Push subscription loading failed:",
+          error
+        );
+
+        setPushSubscriptionError(
+          "Could not load notification subscribers. Check your Firestore security rules."
+        );
+
+        setPushSubscriptionLoading(false);
       }
     );
 
@@ -670,8 +740,26 @@ export default function Dashboard() {
     (voucher) => voucher.active
   );
 
-  const metricsLoading =
-    feedbackLoading || engagementLoading || voucherLoading;
+  // Count subscriptions for this cafe.
+  // These are browser/device subscriptions, not unique people.
+  const activePushSubscriptions = pushSubscriptions.filter(
+    (item) =>
+      item.active === true &&
+      Boolean(item.subscription?.endpoint)
+  );
+
+  const inactivePushSubscriptions = pushSubscriptions.filter(
+    (item) => item.active !== true
+  );
+
+  const activeSubscriberCount =
+    activePushSubscriptions.length;
+
+  const notificationAllowedCount =
+    activePushSubscriptions.length;
+
+  const inactiveSubscriberCount =
+    inactivePushSubscriptions.length;
 
   return (
     <main className="min-h-screen bg-[#FFF7ED] text-slate-800">
@@ -828,6 +916,39 @@ export default function Dashboard() {
             icon="🎁"
             description="All-time claims from voucher usage"
           />
+
+          <StatCard
+            title="Active Subscribers"
+            value={
+              pushSubscriptionLoading
+                ? "..."
+                : activeSubscriberCount.toString()
+            }
+            icon="🔔"
+            description="Active browser/device subscriptions"
+          />
+
+          <StatCard
+            title="Notifications Allowed"
+            value={
+              pushSubscriptionLoading
+                ? "..."
+                : notificationAllowedCount.toString()
+            }
+            icon="📢"
+            description="Active subscriptions eligible for push"
+          />
+
+          <StatCard
+            title="Inactive Subscriptions"
+            value={
+              pushSubscriptionLoading
+                ? "..."
+                : inactiveSubscriberCount.toString()
+            }
+            icon="🔕"
+            description="Subscriptions marked inactive"
+          />
         </section>
 
         {/* Errors */}
@@ -846,6 +967,12 @@ export default function Dashboard() {
         {voucherError && (
           <div className="mb-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
             {voucherError}
+          </div>
+        )}
+
+        {pushSubscriptionError && (
+          <div className="mb-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+            {pushSubscriptionError}
           </div>
         )}
 
@@ -1358,6 +1485,14 @@ export default function Dashboard() {
               title="Loyalty Vouchers"
               description="Create and manage discounts and customer loyalty vouchers."
               action="Manage Vouchers →"
+            />
+
+            <ActionCard
+              href="/dashboard/notifications"
+              icon="🔔"
+              title="Notification Management"
+              description="Manage subscribers, send special offers, and view notification campaigns."
+              action="Manage Notifications →"
             />
           </div>
         </section>
