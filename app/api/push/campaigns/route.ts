@@ -1,248 +1,254 @@
-﻿import { NextRequest, NextResponse } from "next/server";
-import { getAuth } from "firebase-admin/auth";
-import { getApp } from "firebase-admin/app";
+﻿
+import { NextRequest, NextResponse } from "next/server";
 import {
   Timestamp,
   type DocumentData,
+  type QueryDocumentSnapshot,
 } from "firebase-admin/firestore";
 
-import { adminDb } from "@/lib/firebase-admin";
+import { adminAuth, adminDb } from "@/lib/firebase-admin";
 
+/**
+ * Always return JSON from this API.
+ */
+function jsonResponse(
+  data: Record<string, unknown>,
+  status = 200
+) {
+  return NextResponse.json(data, {
+    status,
+    headers: {
+      "Cache-Control": "no-store",
+    },
+  });
+}
 
+/**
+ * Verify that the signed-in Firebase user owns this cafe.
+ *
+ * Current CafeFlow setup:
+ * Firebase UID === cafeId
+ */
 async function verifyCafeOwner(
   request: NextRequest,
   cafeId: string
-) {
-  const authorization =
-    request.headers.get("authorization");
+): Promise<boolean> {
+  const authorization = request.headers.get("authorization");
 
-  if (
-    !authorization?.startsWith("Bearer ")
-  ) {
+  if (!authorization?.startsWith("Bearer ")) {
     return false;
   }
 
-  const token = authorization.slice(
-    "Bearer ".length
-  );
+  const token = authorization.slice("Bearer ".length).trim();
+
+  if (!token) {
+    return false;
+  }
 
   try {
-    const decodedToken =
-      await getAuth(
-        getApp("cafeflow-admin")
-      ).verifyIdToken(token);
+    const decodedToken = await adminAuth.verifyIdToken(token);
 
-    // In the current CafeFlow setup,
-    // the owner's Firebase UID is the cafeId.
     return decodedToken.uid === cafeId;
   } catch (error) {
-    console.error(
-      "Cafe owner verification failed:",
-      error
-    );
-
+    console.error("Cafe owner verification failed:", error);
     return false;
   }
 }
 
-// Convert Firestore timestamps to ISO strings
-// so the frontend can display dates consistently.
-function timestampToIso(
-  value: unknown
-): string | null {
-  if (!value) {
+/**
+ * Convert Firestore timestamps and date values into ISO strings.
+ */
+function timestampToIso(value: unknown): string | null {
+  if (value == null) {
     return null;
   }
 
-  if (
-    value instanceof Timestamp
-  ) {
-    return value.toDate().toISOString();
-  }
+  try {
+    if (value instanceof Timestamp) {
+      return value.toDate().toISOString();
+    }
 
-  if (
-    value instanceof Date
-  ) {
-    return Number.isNaN(
-      value.getTime()
-    )
-      ? null
-      : value.toISOString();
-  }
+    if (value instanceof Date) {
+      if (Number.isNaN(value.getTime())) {
+        return null;
+      }
 
-  if (
-    typeof value === "string"
-  ) {
-    const date = new Date(value);
+      return value.toISOString();
+    }
 
-    return Number.isNaN(
-      date.getTime()
-    )
-      ? null
-      : date.toISOString();
-  }
+    if (typeof value === "string") {
+      const date = new Date(value);
 
-  if (
-    typeof value === "object"
-  ) {
-    const timestamp =
-      value as {
+      return Number.isNaN(date.getTime())
+        ? null
+        : date.toISOString();
+    }
+
+    if (typeof value === "number") {
+      const date = new Date(value);
+
+      return Number.isNaN(date.getTime())
+        ? null
+        : date.toISOString();
+    }
+
+    if (typeof value === "object") {
+      const timestamp = value as {
         seconds?: number;
         _seconds?: number;
         toDate?: () => Date;
       };
 
-    if (
-      typeof timestamp.toDate === "function"
-    ) {
-      const date =
-        timestamp.toDate();
+      if (typeof timestamp.toDate === "function") {
+        const date = timestamp.toDate();
 
-      return Number.isNaN(
-        date.getTime()
-      )
-        ? null
-        : date.toISOString();
+        return date instanceof Date &&
+          !Number.isNaN(date.getTime())
+          ? date.toISOString()
+          : null;
+      }
+
+      const seconds =
+        timestamp.seconds ?? timestamp._seconds;
+
+      if (typeof seconds === "number") {
+        const date = new Date(seconds * 1000);
+
+        return Number.isNaN(date.getTime())
+          ? null
+          : date.toISOString();
+      }
     }
-
-    const seconds =
-      timestamp.seconds ??
-      timestamp._seconds;
-
-    if (
-      typeof seconds === "number"
-    ) {
-      const date =
-        new Date(seconds * 1000);
-
-      return Number.isNaN(
-        date.getTime()
-      )
-        ? null
-        : date.toISOString();
-    }
+  } catch (error) {
+    console.error("Date conversion failed:", error);
   }
 
   return null;
 }
 
+/**
+ * Safely serialize a campaign document for the frontend.
+ */
 function serializeCampaign(
-  document: {
-    id: string;
-    data: () => DocumentData;
-  }
+  document: QueryDocumentSnapshot<DocumentData>
 ) {
   const data = document.data();
 
   return {
-    id: document.id,
     ...data,
-    createdAt:
-      timestampToIso(data.createdAt),
-    scheduledAt:
-      timestampToIso(data.scheduledAt),
-    sentAt:
-      timestampToIso(data.sentAt),
-    updatedAt:
-      timestampToIso(data.updatedAt),
+    id: document.id,
+
+    createdAt: timestampToIso(data.createdAt),
+    scheduledAt: timestampToIso(data.scheduledAt),
+    sentAt: timestampToIso(data.sentAt),
+    updatedAt: timestampToIso(data.updatedAt),
   };
 }
 
-export async function GET(
-  request: NextRequest
-) {
+/**
+ * GET /api/push/campaigns?cafeId=...
+ *
+ * Load campaigns belonging to the authenticated cafe owner.
+ */
+export async function GET(request: NextRequest) {
   try {
     const cafeId =
-      request.nextUrl.searchParams
-        .get("cafeId")
-        ?.trim();
+      request.nextUrl.searchParams.get("cafeId")?.trim() ?? "";
 
     if (!cafeId) {
-      return NextResponse.json(
+      return jsonResponse(
         {
-          error:
-            "Cafe ID is required.",
+          success: false,
+          error: "Cafe ID is required.",
         },
-        { status: 400 }
+        400
       );
     }
 
-    const isOwner =
-      await verifyCafeOwner(
-        request,
-        cafeId
-      );
+    const isOwner = await verifyCafeOwner(request, cafeId);
 
     if (!isOwner) {
-      return NextResponse.json(
+      return jsonResponse(
         {
-          error: "Unauthorized.",
+          success: false,
+          error: "Unauthorized. Please sign in again.",
         },
-        { status: 401 }
+        401
       );
     }
 
-    const snapshot =
-      await adminDb
-        .collection("push_campaigns")
-        .where(
-          "cafeId",
-          "==",
-          cafeId
-        )
-        .get();
+    const snapshot = await adminDb
+      .collection("push_campaigns")
+      .where("cafeId", "==", cafeId)
+      .get();
 
-    const campaigns =
-      snapshot.docs
-        .map((document) =>
-          serializeCampaign(document)
-        )
-        .sort(
-          (a, b) => {
-            const aTime =
-              a.createdAt
-                ? new Date(
-                    a.createdAt
-                  ).getTime()
-                : 0;
+    const campaigns = snapshot.docs
+      .map((document) => serializeCampaign(document))
+      .sort((a, b) => {
+        const aTime = a.createdAt
+          ? new Date(a.createdAt).getTime()
+          : 0;
 
-            const bTime =
-              b.createdAt
-                ? new Date(
-                    b.createdAt
-                  ).getTime()
-                : 0;
+        const bTime = b.createdAt
+          ? new Date(b.createdAt).getTime()
+          : 0;
 
-            return bTime - aTime;
-          }
-        );
+        return bTime - aTime;
+      });
 
-    return NextResponse.json({
+    return jsonResponse({
       success: true,
       campaigns,
     });
   } catch (error) {
-    console.error(
-      "Campaign list error:",
-      error
-    );
+    console.error("Campaign list error:", error);
 
-    return NextResponse.json(
+    return jsonResponse(
       {
-        error:
-          "Unable to load campaigns.",
+        success: false,
+        error: "Unable to load campaigns. Please try again.",
       },
-      { status: 500 }
+      500
     );
   }
 }
 
-export async function POST(
-  request: NextRequest
-) {
+/**
+ * POST /api/push/campaigns
+ *
+ * Create a draft or scheduled push campaign.
+ */
+export async function POST(request: NextRequest) {
   try {
-    const body =
-      await request.json();
+    let body: Record<string, unknown>;
+
+    try {
+      const parsedBody: unknown = await request.json();
+
+      if (
+        !parsedBody ||
+        typeof parsedBody !== "object" ||
+        Array.isArray(parsedBody)
+      ) {
+        return jsonResponse(
+          {
+            success: false,
+            error: "Invalid request body.",
+          },
+          400
+        );
+      }
+
+      body = parsedBody as Record<string, unknown>;
+    } catch {
+      return jsonResponse(
+        {
+          success: false,
+          error: "Request body must contain valid JSON.",
+        },
+        400
+      );
+    }
 
     const cafeId =
       typeof body.cafeId === "string"
@@ -276,50 +282,39 @@ export async function POST(
         : null;
 
     // Required fields.
-    if (
-      !cafeId ||
-      !title ||
-      !message
-    ) {
-      return NextResponse.json(
+    if (!cafeId || !title || !message) {
+      return jsonResponse(
         {
-          error:
-            "Cafe ID, title, and message are required.",
+          success: false,
+          error: "Cafe ID, title, and message are required.",
         },
-        { status: 400 }
+        400
       );
     }
 
     // Length validation.
-    if (
-      title.length > 100 ||
-      message.length > 500
-    ) {
-      return NextResponse.json(
+    if (title.length > 100 || message.length > 500) {
+      return jsonResponse(
         {
-          error:
-            "Title or message is too long.",
+          success: false,
+          error: "Title or message is too long.",
         },
-        { status: 400 }
+        400
       );
     }
 
     // Validate scheduled date.
     if (
       status === "scheduled" &&
-      (
-        !scheduledAt ||
-        Number.isNaN(
-          scheduledAt.getTime()
-        )
-      )
+      (!scheduledAt ||
+        Number.isNaN(scheduledAt.getTime()))
     ) {
-      return NextResponse.json(
+      return jsonResponse(
         {
-          error:
-            "A valid scheduled date is required.",
+          success: false,
+          error: "A valid scheduled date is required.",
         },
-        { status: 400 }
+        400
       );
     }
 
@@ -327,109 +322,96 @@ export async function POST(
     if (
       status === "scheduled" &&
       scheduledAt &&
-      scheduledAt.getTime() <=
-        Date.now()
+      scheduledAt.getTime() <= Date.now()
     ) {
-      return NextResponse.json(
+      return jsonResponse(
         {
-          error:
-            "Scheduled time must be in the future.",
+          success: false,
+          error: "Scheduled time must be in the future.",
         },
-        { status: 400 }
+        400
       );
     }
 
     // Verify owner.
-    const isOwner =
-      await verifyCafeOwner(
-        request,
-        cafeId
-      );
+    const isOwner = await verifyCafeOwner(request, cafeId);
 
     if (!isOwner) {
-      return NextResponse.json(
+      return jsonResponse(
         {
-          error: "Unauthorized.",
+          success: false,
+          error: "Unauthorized. Please sign in again.",
         },
-        { status: 401 }
+        401
       );
     }
 
     // Verify cafe exists.
-    const cafeSnapshot =
-      await adminDb
-        .collection("public_cafes")
-        .doc(cafeId)
-        .get();
+    const cafeSnapshot = await adminDb
+      .collection("public_cafes")
+      .doc(cafeId)
+      .get();
 
     if (!cafeSnapshot.exists) {
-      return NextResponse.json(
+      return jsonResponse(
         {
+          success: false,
           error: "Cafe not found.",
         },
-        { status: 404 }
+        404
       );
     }
 
-    let voucherCode:
-      string | null = null;
+    let voucherCode: string | null = null;
 
     // Validate voucher if selected.
     if (voucherId) {
-      const voucherSnapshot =
-        await adminDb
-          .collection("vouchers")
-          .doc(voucherId)
-          .get();
+      const voucherSnapshot = await adminDb
+        .collection("vouchers")
+        .doc(voucherId)
+        .get();
 
-      if (
-        !voucherSnapshot.exists
-      ) {
-        return NextResponse.json(
+      if (!voucherSnapshot.exists) {
+        return jsonResponse(
           {
-            error:
-              "The selected voucher was not found.",
+            success: false,
+            error: "The selected voucher was not found.",
           },
-          { status: 404 }
+          404
         );
       }
 
-      const voucher =
-        voucherSnapshot.data();
+      const voucher = voucherSnapshot.data();
 
       if (!voucher) {
-        return NextResponse.json(
+        return jsonResponse(
           {
-            error:
-              "Unable to read the selected voucher.",
+            success: false,
+            error: "Unable to read the selected voucher.",
           },
-          { status: 404 }
+          404
         );
       }
 
       // Check voucher ownership.
-      if (
-        voucher.cafeId !== cafeId
-      ) {
-        return NextResponse.json(
+      if (voucher.cafeId !== cafeId) {
+        return jsonResponse(
           {
-            error:
-              "This voucher does not belong to your cafe.",
+            success: false,
+            error: "This voucher does not belong to your cafe.",
           },
-          { status: 403 }
+          403
         );
       }
 
       // Check active status.
-      if (
-        voucher.active !== true
-      ) {
-        return NextResponse.json(
+      if (voucher.active !== true) {
+        return jsonResponse(
           {
-            error:
-              "The selected voucher is inactive.",
+            success: false,
+            error: "The selected voucher is inactive.",
           },
-          { status: 400 }
+          400
         );
       }
 
@@ -439,45 +421,35 @@ export async function POST(
           ? voucher.expiryDate
           : "";
 
-      const today =
-        new Date()
-          .toISOString()
-          .slice(0, 10);
+      const today = new Date()
+        .toISOString()
+        .slice(0, 10);
 
-      if (
-        expiryDate &&
-        expiryDate < today
-      ) {
-        return NextResponse.json(
+      if (expiryDate && expiryDate < today) {
+        return jsonResponse(
           {
-            error:
-              "The selected voucher has expired.",
+            success: false,
+            error: "The selected voucher has expired.",
           },
-          { status: 400 }
+          400
         );
       }
 
       // Check usage limit.
-      const usageLimit =
-        Number(
-          voucher.usageLimit ?? 0
-        );
-
-      const usageCount =
-        Number(
-          voucher.usageCount ?? 0
-        );
+      const usageLimit = Number(voucher.usageLimit ?? 0);
+      const usageCount = Number(voucher.usageCount ?? 0);
 
       if (
         usageLimit > 0 &&
         usageCount >= usageLimit
       ) {
-        return NextResponse.json(
+        return jsonResponse(
           {
+            success: false,
             error:
               "The selected voucher has reached its usage limit.",
           },
-          { status: 400 }
+          400
         );
       }
 
@@ -490,62 +462,50 @@ export async function POST(
     // Save campaign.
     const now = Timestamp.now();
 
-    const campaignRef =
-      await adminDb
-        .collection("push_campaigns")
-        .add({
-          cafeId,
-          title,
-          message,
+    const campaignRef = await adminDb
+      .collection("push_campaigns")
+      .add({
+        cafeId,
+        title,
+        message,
 
-          voucherId,
-          voucherCode,
+        voucherId,
+        voucherCode,
 
-          status,
+        status,
 
-          scheduledAt:
-            status === "scheduled" &&
-            scheduledAt
-              ? Timestamp.fromDate(
-                  scheduledAt
-                )
-              : null,
+        scheduledAt:
+          status === "scheduled" && scheduledAt
+            ? Timestamp.fromDate(scheduledAt)
+            : null,
 
-          createdAt: now,
-          updatedAt: now,
-          sentAt: null,
+        createdAt: now,
+        updatedAt: now,
+        sentAt: null,
 
-          sentCount: 0,
-          failedCount: 0,
-          error: null,
-        });
+        sentCount: 0,
+        failedCount: 0,
+        error: null,
+      });
 
     console.log(
       `Campaign created: ${campaignRef.id}. Status: ${status}.`
     );
 
-    return NextResponse.json({
+    return jsonResponse({
       success: true,
-      campaignId:
-        campaignRef.id,
-      message:
-        "Campaign saved.",
+      campaignId: campaignRef.id,
+      message: "Campaign saved.",
     });
   } catch (error) {
-    console.error(
-      "Campaign creation error:",
-      error
-    );
+    console.error("Campaign creation error:", error);
 
-    return NextResponse.json(
+    return jsonResponse(
       {
-        error:
-          error instanceof Error
-            ? error.message
-            : "Unable to create campaign.",
+        success: false,
+        error: "Unable to create campaign. Please try again.",
       },
-      { status: 500 }
+      500
     );
   }
 }
-
