@@ -1,10 +1,10 @@
-﻿/* CafeFlow Push Notification Service Worker */
+﻿
+/* CafeFlow Push Notification Service Worker */
 
 const DEFAULT_TITLE = "CafeFlow";
 const DEFAULT_BODY = "You have a new cafe offer!";
 const DEFAULT_URL = "/";
 
-// Standard fallback icon path. Make sure this file exists in your public folder!
 const NOTIFICATION_ICON = "/logo.jpeg";
 const NOTIFICATION_BADGE = "/logo.jpeg";
 
@@ -14,20 +14,38 @@ const NOTIFICATION_BADGE = "/logo.jpeg";
 function getSafeUrl(url) {
   try {
     const targetUrl = new URL(
-      url || DEFAULT_URL,
+      typeof url === "string" && url.trim()
+        ? url
+        : DEFAULT_URL,
       self.location.origin
     );
 
+    // Never allow notifications to open an external website.
     if (targetUrl.origin !== self.location.origin) {
-      return DEFAULT_URL;
+      return new URL(DEFAULT_URL, self.location.origin).href;
     }
 
     return targetUrl.href;
   } catch (error) {
     console.error("CafeFlow: Invalid notification URL", error);
-    return DEFAULT_URL;
+
+    return new URL(DEFAULT_URL, self.location.origin).href;
   }
 }
+
+/**
+ * Activate the new service worker immediately.
+ */
+self.addEventListener("install", (event) => {
+  event.waitUntil(self.skipWaiting());
+});
+
+/**
+ * Take control of existing CafeFlow tabs.
+ */
+self.addEventListener("activate", (event) => {
+  event.waitUntil(self.clients.claim());
+});
 
 /**
  * Receive push notifications.
@@ -47,8 +65,12 @@ self.addEventListener("push", (event) => {
       if (event.data) {
         try {
           const payload = event.data.json();
+
           if (payload && typeof payload === "object") {
-            data = { ...data, ...payload };
+            data = {
+              ...data,
+              ...payload,
+            };
           }
         } catch (error) {
           try {
@@ -59,64 +81,136 @@ self.addEventListener("push", (event) => {
         }
       }
 
-      const title = typeof data.title === "string" && data.title.trim() ? data.title.trim() : DEFAULT_TITLE;
-      const body = typeof data.body === "string" && data.body.trim() ? data.body.trim() : DEFAULT_BODY;
-      const targetUrl = getSafeUrl(data.url || data.data?.url);
+      const title =
+        typeof data.title === "string" && data.title.trim()
+          ? data.title.trim()
+          : DEFAULT_TITLE;
 
-      // Check if a payload-specific icon path was sent, otherwise use base branding asset
-      const notificationIcon = typeof data.icon === "string" && data.icon.trim() ? data.icon : NOTIFICATION_ICON;
-      const notificationBadge = typeof data.badge === "string" && data.badge.trim() ? data.badge : NOTIFICATION_BADGE;
+      const body =
+        typeof data.body === "string" && data.body.trim()
+          ? data.body.trim()
+          : DEFAULT_BODY;
+
+      // Accept both the top-level URL and nested data URL.
+      const notificationUrl =
+        data.url ||
+        data.data?.url ||
+        DEFAULT_URL;
+
+      const targetUrl = getSafeUrl(notificationUrl);
+
+      const notificationIcon =
+        typeof data.icon === "string" && data.icon.trim()
+          ? data.icon
+          : NOTIFICATION_ICON;
+
+      const notificationBadge =
+        typeof data.badge === "string" && data.badge.trim()
+          ? data.badge
+          : NOTIFICATION_BADGE;
 
       const options = {
         body,
         icon: notificationIcon,
         badge: notificationBadge,
-        image: typeof data.image === "string" ? data.image : undefined,
+
+        image:
+          typeof data.image === "string"
+            ? data.image
+            : undefined,
+
         data: {
           url: targetUrl,
           campaignId: data.campaignId || null,
         },
-        tag: data.campaignId ? `cafeflow-campaign-${data.campaignId}` : `cafeflow-notification-${Date.now()}`,
+
+        tag: data.campaignId
+          ? `cafeflow-campaign-${data.campaignId}`
+          : `cafeflow-notification-${Date.now()}`,
+
         renotify: false,
       };
 
       try {
-        await self.registration.showNotification(title, options);
+        await self.registration.showNotification(
+          title,
+          options
+        );
+
+        console.log(
+          "CafeFlow notification URL:",
+          targetUrl
+        );
       } catch (error) {
-        console.error("CafeFlow: Unable to display push notification", error);
+        console.error(
+          "CafeFlow: Unable to display push notification",
+          error
+        );
       }
     })()
   );
 });
 
 /**
- * Open the special offer when the customer clicks a notification.
+ * Open the special offer when a customer clicks a notification.
  */
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
-  const targetUrl = getSafeUrl(event.notification.data?.url || DEFAULT_URL);
+
+  const notificationData = event.notification.data || {};
+
+  const targetUrl = getSafeUrl(
+    notificationData.url || DEFAULT_URL
+  );
 
   event.waitUntil(
     (async () => {
       try {
-        const windowClients = await clients.matchAll({
+        const windowClients = await self.clients.matchAll({
           type: "window",
           includeUncontrolled: true,
         });
 
-        // Reuse an existing open CafeFlow tab if possible
+        /*
+         * Reuse an existing CafeFlow tab if possible.
+         *
+         * If the tab is on the homepage or login page,
+         * navigate it to the offer URL.
+         */
         for (const client of windowClients) {
-          if (client.url === targetUrl && "focus" in client) {
-            return client.focus();
+          try {
+            const clientUrl = new URL(client.url);
+
+            if (
+              clientUrl.origin === self.location.origin &&
+              "focus" in client
+            ) {
+              if (client.url !== targetUrl) {
+                await client.navigate(targetUrl);
+              }
+
+              return await client.focus();
+            }
+          } catch (clientError) {
+            console.error(
+              "CafeFlow: Unable to navigate existing tab",
+              clientError
+            );
           }
         }
 
-        // If no matching tab is open, open a new window path
-        if (clients.openWindow) {
-          return clients.openWindow(targetUrl);
+        /*
+         * No existing CafeFlow tab found.
+         * Open the exact notification URL.
+         */
+        if (self.clients.openWindow) {
+          return await self.clients.openWindow(targetUrl);
         }
       } catch (error) {
-        console.error("CafeFlow: Error handling notification click", error);
+        console.error(
+          "CafeFlow: Error handling notification click",
+          error
+        );
       }
     })()
   );
