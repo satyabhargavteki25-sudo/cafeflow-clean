@@ -1,6 +1,7 @@
 
 export const instant = false;
 
+import { connection } from "next/server";
 import { notFound } from "next/navigation";
 
 import { adminDb } from "@/lib/firebase-admin";
@@ -15,9 +16,12 @@ type OfferPageProps = {
 export default async function OfferPage({
   params,
 }: OfferPageProps) {
+  // Prevent Next.js from prerendering this dynamic offer page.
+  await connection();
+
   const { campaignId } = await params;
 
-  // Load the campaign from Firestore.
+  // Load the campaign using its Firestore document ID.
   const campaignSnapshot = await adminDb
     .collection("push_campaigns")
     .doc(campaignId)
@@ -32,34 +36,35 @@ export default async function OfferPage({
   if (
     !campaign ||
     typeof campaign.title !== "string" ||
-    typeof campaign.message !== "string"
+    typeof campaign.message !== "string" ||
+    typeof campaign.cafeId !== "string"
   ) {
     notFound();
   }
 
-  // Get the cafe name when available.
+  const cafeId = campaign.cafeId;
+
+  // Load the cafe details.
+  const cafeSnapshot = await adminDb
+    .collection("public_cafes")
+    .doc(cafeId)
+    .get();
+
   let cafeName = "CafeFlow Special Offer";
 
-  if (typeof campaign.cafeId === "string") {
-    const cafeSnapshot = await adminDb
-      .collection("public_cafes")
-      .doc(campaign.cafeId)
-      .get();
+  if (cafeSnapshot.exists) {
+    const cafe = cafeSnapshot.data();
 
-    if (cafeSnapshot.exists) {
-      const cafe = cafeSnapshot.data();
-
-      if (
-        typeof cafe?.name === "string" &&
-        cafe.name.trim()
-      ) {
-        cafeName = cafe.name.trim();
-      }
+    if (
+      typeof cafe?.name === "string" &&
+      cafe.name.trim()
+    ) {
+      cafeName = cafe.name.trim();
     }
   }
 
-  // Temporary display code derived from the campaign ID.
-  // This code is not connected to checkout redemption yet.
+  // Temporary coupon code derived from the campaign ID.
+  // This is not connected to checkout redemption yet.
   const couponCode = `CF-${campaignId
     .replace(/[^a-zA-Z0-9]/g, "")
     .slice(0, 8)
@@ -69,6 +74,7 @@ export default async function OfferPage({
     <main className="min-h-screen bg-gradient-to-b from-emerald-50 via-white to-white px-4 py-10">
       <div className="mx-auto max-w-lg">
         <div className="overflow-hidden rounded-3xl border border-emerald-100 bg-white shadow-xl">
+
           {/* CafeFlow branding */}
           <div className="flex flex-col items-center bg-emerald-700 px-6 py-8 text-center text-white">
             <img
@@ -115,14 +121,17 @@ export default async function OfferPage({
               </p>
 
               <div className="mt-5">
-                <CopyCouponButton couponCode={couponCode} />
+                <CopyCouponButton
+                  couponCode={couponCode}
+                />
               </div>
             </div>
 
             <p className="mt-6 text-xs leading-5 text-gray-500">
-              Show this offer to the cafe staff when placing your
-              order. Coupon redemption and discount validation will
-              be added to CafeFlow's checkout system.
+              Show this offer to the cafe staff when
+              placing your order. Coupon redemption and
+              discount validation will be added to
+              CafeFlow's checkout system.
             </p>
           </div>
         </div>

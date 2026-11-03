@@ -22,20 +22,56 @@ type VoucherData = {
 };
 
 function isVoucherExpired(expiryDate: string): boolean {
-  if (!expiryDate) return false;
+  if (!expiryDate) {
+    return false;
+  }
+
   const today = new Date().toISOString().slice(0, 10);
+
   return expiryDate < today;
 }
 
 export async function POST(request: Request) {
   try {
-    const body = await request.json();
-    const cafeId = typeof body.cafeId === "string" ? body.cafeId.trim() : "";
-    const subscription = body.subscription as PushSubscriptionPayload | undefined;
+    let body: unknown;
+
+    try {
+      body = await request.json();
+    } catch {
+      return NextResponse.json(
+        { error: "Request body must contain valid JSON." },
+        { status: 400 }
+      );
+    }
+
+    if (
+      !body ||
+      typeof body !== "object" ||
+      Array.isArray(body)
+    ) {
+      return NextResponse.json(
+        { error: "Invalid request body." },
+        { status: 400 }
+      );
+    }
+
+    const requestBody = body as Record<string, unknown>;
+
+    const cafeId =
+      typeof requestBody.cafeId === "string"
+        ? requestBody.cafeId.trim()
+        : "";
+
+    const subscription =
+      requestBody.subscription as
+        | PushSubscriptionPayload
+        | undefined;
 
     if (!cafeId || !subscription) {
       return NextResponse.json(
-        { error: "Cafe ID and subscription are required." },
+        {
+          error: "Cafe ID and subscription are required.",
+        },
         { status: 400 }
       );
     }
@@ -44,7 +80,9 @@ export async function POST(request: Request) {
       typeof subscription.endpoint !== "string" ||
       !subscription.endpoint.startsWith("https://") ||
       typeof subscription.keys?.p256dh !== "string" ||
-      typeof subscription.keys?.auth !== "string"
+      !subscription.keys.p256dh ||
+      typeof subscription.keys?.auth !== "string" ||
+      !subscription.keys.auth
     ) {
       return NextResponse.json(
         { error: "Invalid push subscription." },
@@ -52,6 +90,7 @@ export async function POST(request: Request) {
       );
     }
 
+    // Confirm that this cafe exists.
     const cafeSnapshot = await adminDb
       .collection("public_cafes")
       .doc(cafeId)
@@ -64,11 +103,12 @@ export async function POST(request: Request) {
       );
     }
 
+    // Generate a stable ID for this cafe + browser endpoint.
     const subscriptionId = createHash("sha256")
       .update(`${cafeId}:${subscription.endpoint}`)
       .digest("hex");
 
-    // FIX: Save under the subcollection paths targeted by the delivery / cron engine
+    // Store subscriptions in the same location used by delivery.
     const subscriptionRef = adminDb
       .collection("cafes")
       .doc(cafeId)
@@ -78,13 +118,20 @@ export async function POST(request: Request) {
     await subscriptionRef.set(
       {
         cafeId,
-        subscription,
+        subscription: {
+          endpoint: subscription.endpoint,
+          keys: {
+            p256dh: subscription.keys.p256dh,
+            auth: subscription.keys.auth,
+          },
+        },
         active: true,
         updatedAt: new Date(),
       },
       { merge: true }
     );
 
+    // Each browser subscription can claim the welcome reward once.
     const welcomeClaimRef = adminDb
       .collection("push_welcome_claims")
       .doc(subscriptionId);
@@ -96,55 +143,93 @@ export async function POST(request: Request) {
 
     const welcomeVoucher = await adminDb.runTransaction(
       async (transaction) => {
-        const existingClaim = await transaction.get(welcomeClaimRef);
+        // Read the claim first.
+        const existingClaim =
+          await transaction.get(welcomeClaimRef);
 
         if (existingClaim.exists) {
           const saved = existingClaim.data();
-          return saved?.voucher ? saved.voucher : null;
+
+          return saved?.voucher ?? null;
         }
 
-        const voucherResults = await transaction.get(vouchersQuery);
-        const availableVoucher = voucherResults.docs.find((voucherDoc) => {
-          const voucher = voucherDoc.data() as VoucherData;
-          const usageCount = Number(voucher.usageCount ?? 0);
-          const usageLimit = Number(voucher.usageLimit ?? 0);
-          const expiryDate = String(voucher.expiryDate ?? "");
-          const withinUsageLimit = usageLimit <= 0 || usageCount < usageLimit;
+        // Find available active vouchers.
+        const voucherResults =
+          await transaction.get(vouchersQuery);
 
-          return (
-            voucher.active === true &&
-            voucher.cafeId === cafeId &&
-            withinUsageLimit &&
-            !isVoucherExpired(expiryDate)
-          );
-        });
+        const availableVoucher =
+          voucherResults.docs.find((voucherDoc) => {
+            const voucher =
+              voucherDoc.data() as VoucherData;
+
+            const usageCount = Number(
+              voucher.usageCount ?? 0
+            );
+
+            const usageLimit = Number(
+              voucher.usageLimit ?? 0
+            );
+
+            const expiryDate = String(
+              voucher.expiryDate ?? ""
+            );
+
+            const withinUsageLimit =
+              usageLimit <= 0 ||
+              usageCount < usageLimit;
+
+            return (
+              voucher.active === true &&
+              voucher.cafeId === cafeId &&
+              withinUsageLimit &&
+              !isVoucherExpired(expiryDate)
+            );
+          });
 
         if (!availableVoucher) {
           return null;
         }
 
         const voucherRef = availableVoucher.ref;
-        const voucher = availableVoucher.data() as VoucherData;
-        const usageCount = Number(voucher.usageCount ?? 0);
-        const usageLimit = Number(voucher.usageLimit ?? 0);
-        const expiryDate = String(voucher.expiryDate ?? "");
+
+        const voucher =
+          availableVoucher.data() as VoucherData;
+
+        const usageCount = Number(
+          voucher.usageCount ?? 0
+        );
+
+        const usageLimit = Number(
+          voucher.usageLimit ?? 0
+        );
+
+        const expiryDate = String(
+          voucher.expiryDate ?? ""
+        );
 
         const reward = {
           id: availableVoucher.id,
           cafeId,
           code: String(voucher.code ?? ""),
-          discountType: voucher.discountType === "fixed" ? "fixed" : "percentage",
-          discountValue: Number(voucher.discountValue ?? 0),
+          discountType:
+            voucher.discountType === "fixed"
+              ? "fixed"
+              : "percentage",
+          discountValue: Number(
+            voucher.discountValue ?? 0
+          ),
           expiryDate,
           usageLimit,
           usageCount: usageCount + 1,
           active: true,
         };
 
+        // Increment the voucher's usage count.
         transaction.update(voucherRef, {
           usageCount: usageCount + 1,
         });
 
+        // Save the welcome claim.
         transaction.set(welcomeClaimRef, {
           cafeId,
           subscriptionId,
@@ -153,7 +238,11 @@ export async function POST(request: Request) {
           createdAt: new Date(),
         });
 
-        const engagementRef = adminDb.collection("engagement_logs").doc();
+        // Record engagement.
+        const engagementRef = adminDb
+          .collection("engagement_logs")
+          .doc();
+
         transaction.set(engagementRef, {
           cafeId,
           action: "push_welcome_coupon_claimed",
@@ -174,9 +263,15 @@ export async function POST(request: Request) {
         : "Notifications enabled. No eligible welcome coupon is available right now.",
     });
   } catch (error) {
-    console.error("Push subscription API error:", error);
+    console.error(
+      "Push subscription API error:",
+      error
+    );
+
     return NextResponse.json(
-      { error: "Unable to save the push subscription." },
+      {
+        error: "Unable to save the push subscription.",
+      },
       { status: 500 }
     );
   }

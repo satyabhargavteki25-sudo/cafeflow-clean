@@ -1,15 +1,18 @@
-﻿
-import { NextRequest, NextResponse } from "next/server";
+﻿import { NextRequest, NextResponse } from "next/server";
+
 import {
   Timestamp,
   type DocumentData,
   type QueryDocumentSnapshot,
 } from "firebase-admin/firestore";
 
-import { adminAuth, adminDb } from "@/lib/firebase-admin";
+import {
+  adminAuth,
+  adminDb,
+} from "@/lib/firebase-admin";
 
 /**
- * Always return JSON from this API.
+ * Always return JSON without caching.
  */
 function jsonResponse(
   data: Record<string, unknown>,
@@ -33,32 +36,43 @@ async function verifyCafeOwner(
   request: NextRequest,
   cafeId: string
 ): Promise<boolean> {
-  const authorization = request.headers.get("authorization");
+  const authorization =
+    request.headers.get("authorization");
 
   if (!authorization?.startsWith("Bearer ")) {
     return false;
   }
 
-  const token = authorization.slice("Bearer ".length).trim();
+  const token = authorization
+    .slice("Bearer ".length)
+    .trim();
 
   if (!token) {
     return false;
   }
 
   try {
-    const decodedToken = await adminAuth.verifyIdToken(token);
+    const decodedToken =
+      await adminAuth.verifyIdToken(token);
 
     return decodedToken.uid === cafeId;
   } catch (error) {
-    console.error("Cafe owner verification failed:", error);
+    console.error(
+      "Cafe owner verification failed:",
+      error
+    );
+
     return false;
   }
 }
 
 /**
- * Convert Firestore timestamps and date values into ISO strings.
+ * Convert Firestore timestamps and date values
+ * into ISO strings for frontend use.
  */
-function timestampToIso(value: unknown): string | null {
+function timestampToIso(
+  value: unknown
+): string | null {
   if (value == null) {
     return null;
   }
@@ -99,7 +113,9 @@ function timestampToIso(value: unknown): string | null {
         toDate?: () => Date;
       };
 
-      if (typeof timestamp.toDate === "function") {
+      if (
+        typeof timestamp.toDate === "function"
+      ) {
         const date = timestamp.toDate();
 
         return date instanceof Date &&
@@ -109,7 +125,8 @@ function timestampToIso(value: unknown): string | null {
       }
 
       const seconds =
-        timestamp.seconds ?? timestamp._seconds;
+        timestamp.seconds ??
+        timestamp._seconds;
 
       if (typeof seconds === "number") {
         const date = new Date(seconds * 1000);
@@ -120,14 +137,17 @@ function timestampToIso(value: unknown): string | null {
       }
     }
   } catch (error) {
-    console.error("Date conversion failed:", error);
+    console.error(
+      "Date conversion failed:",
+      error
+    );
   }
 
   return null;
 }
 
 /**
- * Safely serialize a campaign document for the frontend.
+ * Safely serialize a campaign document.
  */
 function serializeCampaign(
   document: QueryDocumentSnapshot<DocumentData>
@@ -148,12 +168,16 @@ function serializeCampaign(
 /**
  * GET /api/push/campaigns?cafeId=...
  *
- * Load campaigns belonging to the authenticated cafe owner.
+ * Load campaigns belonging to the authenticated cafe.
  */
-export async function GET(request: NextRequest) {
+export async function GET(
+  request: NextRequest
+) {
   try {
     const cafeId =
-      request.nextUrl.searchParams.get("cafeId")?.trim() ?? "";
+      request.nextUrl.searchParams
+        .get("cafeId")
+        ?.trim() ?? "";
 
     if (!cafeId) {
       return jsonResponse(
@@ -165,13 +189,18 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const isOwner = await verifyCafeOwner(request, cafeId);
+    const isOwner =
+      await verifyCafeOwner(
+        request,
+        cafeId
+      );
 
     if (!isOwner) {
       return jsonResponse(
         {
           success: false,
-          error: "Unauthorized. Please sign in again.",
+          error:
+            "Unauthorized. Please sign in again.",
         },
         401
       );
@@ -183,7 +212,9 @@ export async function GET(request: NextRequest) {
       .get();
 
     const campaigns = snapshot.docs
-      .map((document) => serializeCampaign(document))
+      .map((document) =>
+        serializeCampaign(document)
+      )
       .sort((a, b) => {
         const aTime = a.createdAt
           ? new Date(a.createdAt).getTime()
@@ -201,12 +232,16 @@ export async function GET(request: NextRequest) {
       campaigns,
     });
   } catch (error) {
-    console.error("Campaign list error:", error);
+    console.error(
+      "Campaign list error:",
+      error
+    );
 
     return jsonResponse(
       {
         success: false,
-        error: "Unable to load campaigns. Please try again.",
+        error:
+          "Unable to load campaigns. Please try again.",
       },
       500
     );
@@ -218,12 +253,16 @@ export async function GET(request: NextRequest) {
  *
  * Create a draft or scheduled push campaign.
  */
-export async function POST(request: NextRequest) {
+export async function POST(
+  request: NextRequest
+) {
   try {
     let body: Record<string, unknown>;
 
+    // Parse request body.
     try {
-      const parsedBody: unknown = await request.json();
+      const parsedBody: unknown =
+        await request.json();
 
       if (
         !parsedBody ||
@@ -239,12 +278,14 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      body = parsedBody as Record<string, unknown>;
+      body =
+        parsedBody as Record<string, unknown>;
     } catch {
       return jsonResponse(
         {
           success: false,
-          error: "Request body must contain valid JSON.",
+          error:
+            "Request body must contain valid JSON.",
         },
         400
       );
@@ -286,18 +327,23 @@ export async function POST(request: NextRequest) {
       return jsonResponse(
         {
           success: false,
-          error: "Cafe ID, title, and message are required.",
+          error:
+            "Cafe ID, title, and message are required.",
         },
         400
       );
     }
 
     // Length validation.
-    if (title.length > 100 || message.length > 500) {
+    if (
+      title.length > 100 ||
+      message.length > 500
+    ) {
       return jsonResponse(
         {
           success: false,
-          error: "Title or message is too long.",
+          error:
+            "Title or message is too long.",
         },
         400
       );
@@ -307,12 +353,15 @@ export async function POST(request: NextRequest) {
     if (
       status === "scheduled" &&
       (!scheduledAt ||
-        Number.isNaN(scheduledAt.getTime()))
+        Number.isNaN(
+          scheduledAt.getTime()
+        ))
     ) {
       return jsonResponse(
         {
           success: false,
-          error: "A valid scheduled date is required.",
+          error:
+            "A valid scheduled date is required.",
         },
         400
       );
@@ -327,20 +376,26 @@ export async function POST(request: NextRequest) {
       return jsonResponse(
         {
           success: false,
-          error: "Scheduled time must be in the future.",
+          error:
+            "Scheduled time must be in the future.",
         },
         400
       );
     }
 
-    // Verify owner.
-    const isOwner = await verifyCafeOwner(request, cafeId);
+    // Verify cafe owner.
+    const isOwner =
+      await verifyCafeOwner(
+        request,
+        cafeId
+      );
 
     if (!isOwner) {
       return jsonResponse(
         {
           success: false,
-          error: "Unauthorized. Please sign in again.",
+          error:
+            "Unauthorized. Please sign in again.",
         },
         401
       );
@@ -364,30 +419,34 @@ export async function POST(request: NextRequest) {
 
     let voucherCode: string | null = null;
 
-    // Validate voucher if selected.
+    // Validate voucher if one was selected.
     if (voucherId) {
-      const voucherSnapshot = await adminDb
-        .collection("vouchers")
-        .doc(voucherId)
-        .get();
+      const voucherSnapshot =
+        await adminDb
+          .collection("vouchers")
+          .doc(voucherId)
+          .get();
 
       if (!voucherSnapshot.exists) {
         return jsonResponse(
           {
             success: false,
-            error: "The selected voucher was not found.",
+            error:
+              "The selected voucher was not found.",
           },
           404
         );
       }
 
-      const voucher = voucherSnapshot.data();
+      const voucher =
+        voucherSnapshot.data();
 
       if (!voucher) {
         return jsonResponse(
           {
             success: false,
-            error: "Unable to read the selected voucher.",
+            error:
+              "Unable to read the selected voucher.",
           },
           404
         );
@@ -398,7 +457,8 @@ export async function POST(request: NextRequest) {
         return jsonResponse(
           {
             success: false,
-            error: "This voucher does not belong to your cafe.",
+            error:
+              "This voucher does not belong to your cafe.",
           },
           403
         );
@@ -409,7 +469,8 @@ export async function POST(request: NextRequest) {
         return jsonResponse(
           {
             success: false,
-            error: "The selected voucher is inactive.",
+            error:
+              "The selected voucher is inactive.",
           },
           400
         );
@@ -425,19 +486,28 @@ export async function POST(request: NextRequest) {
         .toISOString()
         .slice(0, 10);
 
-      if (expiryDate && expiryDate < today) {
+      if (
+        expiryDate &&
+        expiryDate < today
+      ) {
         return jsonResponse(
           {
             success: false,
-            error: "The selected voucher has expired.",
+            error:
+              "The selected voucher has expired.",
           },
           400
         );
       }
 
       // Check usage limit.
-      const usageLimit = Number(voucher.usageLimit ?? 0);
-      const usageCount = Number(voucher.usageCount ?? 0);
+      const usageLimit = Number(
+        voucher.usageLimit ?? 0
+      );
+
+      const usageCount = Number(
+        voucher.usageCount ?? 0
+      );
 
       if (
         usageLimit > 0 &&
@@ -475,8 +545,11 @@ export async function POST(request: NextRequest) {
         status,
 
         scheduledAt:
-          status === "scheduled" && scheduledAt
-            ? Timestamp.fromDate(scheduledAt)
+          status === "scheduled" &&
+          scheduledAt
+            ? Timestamp.fromDate(
+                scheduledAt
+              )
             : null,
 
         createdAt: now,
@@ -498,12 +571,16 @@ export async function POST(request: NextRequest) {
       message: "Campaign saved.",
     });
   } catch (error) {
-    console.error("Campaign creation error:", error);
+    console.error(
+      "Campaign creation error:",
+      error
+    );
 
     return jsonResponse(
       {
         success: false,
-        error: "Unable to create campaign. Please try again.",
+        error:
+          "Unable to create campaign. Please try again.",
       },
       500
     );
